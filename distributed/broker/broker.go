@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"math/rand"
 	"net"
 	"net/rpc"
@@ -9,14 +10,6 @@ import (
 	"time"
 	"uk.ac.bris.cs/gameoflife/stubs"
 )
-
-func CreatWorld(imageHeight, imageWidth int) [][]byte {
-	world := make([][]byte, imageHeight)
-	for i := range world {
-		world[i] = make([]byte, imageWidth)
-	}
-	return world
-}
 
 type Task struct {
 	World [][]byte
@@ -37,6 +30,14 @@ type Broker struct {
 	aliveNum int
 	turn int
 	quit bool
+}
+
+func CreatWorld(imageHeight, imageWidth int) [][]byte {
+	world := make([][]byte, imageHeight)
+	for i := range world {
+		world[i] = make([]byte, imageWidth)
+	}
+	return world
 }
 
 func GetTaskForEachWorker(wholeTask Task, thread int, tasks []Task) []Task {
@@ -98,19 +99,22 @@ func GetWholeResult(results []Result, wholeResult Result, p stubs.Params) Result
 	return wholeResult
 }
 
-var done = make(chan bool)
+var done = make(chan bool) //For channel synchronization
 var quit = make(chan bool)
 var waitGroup sync.WaitGroup
 
 func (b *Broker) RunAllTurns(req stubs.RequestToBroker, res *stubs.ResponseFromBroker) (err error){
-	client, _ := rpc.Dial("tcp", "127.0.0.1:8040")
-	defer client.Close()
+	client1, _ := rpc.Dial("tcp", "127.0.0.1:8040")
+	client2, _ := rpc.Dial("tcp", "127.0.0.1:8050")
+	defer client1.Close()
+	defer client2.Close()
 
 	//press "K", stop listen
 	if req.Stop {
 		request := stubs.RequestToWorker{Stop: true}
 		response := new(stubs.ResponseFromWorker)
-		client.Call(stubs.CalculateNewState, request, response)
+		client1.Call(stubs.CalculateNewState, request, response)
+		client2.Call(stubs.CalculateNewState, request, response)
 		b.listener.Close()
 		return
 	}
@@ -119,8 +123,15 @@ func (b *Broker) RunAllTurns(req stubs.RequestToBroker, res *stubs.ResponseFromB
 	b.aliveNum = 0
 	b.world = req.World
 	b.quit = false
+	// monitor for each server (true means free)
+	c1 := make(chan bool, 1)
+	c2 := make(chan bool, 1)
+	// in the start, make all server all available
+	c1 <- true
+	c2 <- true
 	newWorld := CreatWorld(req.Params.ImageHeight, req.Params.ImageWidth)
 	var waitGroup2 sync.WaitGroup
+	var mutex sync.Mutex
 
 	// ----- Task ----- //
 	WholeTask := Task{
@@ -153,41 +164,70 @@ func (b *Broker) RunAllTurns(req stubs.RequestToBroker, res *stubs.ResponseFromB
 		if b.turn >= req.Params.Turns {
 			break
 		}
+		// initial the whole task
 		WholeTask.World = b.world
-		//fmt.Println("Whole world: ", WholeTask.World)
+		// Separate the Task to each worker
 		tasks = GetTaskForEachWorker(WholeTask, req.Params.Threads, tasks)
+
+		// ----- Run all thread ----- //
 		for t := 0; t < req.Params.Threads; t++ {
-			waitGroup2.Add(1)
+			// --- Sent one task to server --- //
 			request := stubs.RequestToWorker{
 				World:       tasks[t].World,
 				NewWorld:    tasks[t].NewWorld,
 				Turns:       b.turn,
 				ImageHeight: tasks[t].Height,
 				ImageWidth:  tasks[t].Width,
+				Thread:      t,
 				Stop:        false,
 			}
-			response := new(stubs.ResponseFromWorker)
-			client.Call(stubs.CalculateNewState, request, response)
-			results[t].NewWorld = response.NewWorld
-			results[t].AliveNum = response.AliveNumber
-			results[t].Turn = response.Turns
-			//fmt.Println(response.NewWorld)
-			//fmt.Println("Alive:", response.AliveNumber)
-			//fmt.Println("Turn:", response.Turns)
-			waitGroup2.Done()
+			select {
+			case <- c1:
+				fmt.Println("choose 1")
+				waitGroup2.Add(1)
+				response := new(stubs.ResponseFromWorker)
+				go func() {
+					client1.Call(stubs.CalculateNewState, request, response)
+					mutex.Lock()
+					results[response.Thread].Turn = response.Turns
+					results[response.Thread].AliveNum = response.AliveNumber
+					results[response.Thread].NewWorld = response.NewWorld
+					mutex.Unlock()
+					waitGroup2.Done()
+					c1 <- true
+					return
+				}()
+				goto ChooseNext
+			case <- c2:
+				fmt.Println("choose 2")
+				waitGroup2.Add(1)
+				response := new(stubs.ResponseFromWorker)
+				go func() {
+					client2.Call(stubs.CalculateNewState, request, response)
+					mutex.Lock()
+					results[response.Thread].Turn = response.Turns
+					results[response.Thread].AliveNum = response.AliveNumber
+					results[response.Thread].NewWorld = response.NewWorld
+					mutex.Unlock()
+					waitGroup2.Done()
+					c2 <- true
+					return
+				}()
+				goto ChooseNext
+			}
+			ChooseNext:
+				continue
 		}
+
+		// ----- Combine the result and return to distributor -----//
 		waitGroup2.Wait()
-		//fmt.Println("here")
 		wholeResult = GetWholeResult(results, wholeResult, req.Params)
 		newWorld = wholeResult.NewWorld
 		b.aliveNum = wholeResult.AliveNum
 		b.turn = wholeResult.Turn
 		b.world = newWorld
-		//fmt.Println(wholeResult.AliveNum)
-		//fmt.Println(wholeResult.NewWorld)
-		//fmt.Println(wholeResult.Turn)
 		waitGroup.Add(1)
-		done <- true //Channel Synchronization
+		done <- true
 		waitGroup.Wait()
 		select {
 		case <- quit:
@@ -199,13 +239,12 @@ func (b *Broker) RunAllTurns(req stubs.RequestToBroker, res *stubs.ResponseFromB
 }
 
 func (b *Broker) GetNewData(req stubs.RequestNewData, res *stubs.ResponseFromBroker) (err error){
-	<- done //Channel Synchronization
+	<- done
 	res.Turn = b.turn
 	res.AliveNumber = b.aliveNum
 	res.NewWorld = b.world
 	waitGroup.Done()
 	return
-
 }
 
 func (b *Broker) Quit(req stubs.RequestQuit, res *stubs.ResponseFromBroker) (err error){

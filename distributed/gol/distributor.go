@@ -80,14 +80,14 @@ func GetFlippedCell(p Params, world, newWorld [][]byte) []util.Cell {
 
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
-
-	//RPC CAll
+	//RPC Client
 	client, _ := rpc.Dial("tcp", "127.0.0.1:8030")
 	defer client.Close()
 
-	// Create a 2D slice to store the world.
+	// Create a 2D slice and store the world.
 	world := LoadWorld(p, c)
 	newWorld := CreatWorld(p.ImageHeight, p.ImageWidth)
+
 	tickerFinished := make(chan bool)
 	Execute := make(chan bool)
 	pause := false
@@ -95,6 +95,7 @@ func distributor(p Params, c distributorChannels) {
 	aliveNum := 0
 	turn := 0
 
+	//Ticker and Keyboard control
 	go func() {
 		for {
 			//Ticker : every two second out put the alive cells
@@ -162,7 +163,6 @@ func distributor(p Params, c distributorChannels) {
 
 	//update data from broker
 	for {
-		//fmt.Println(turn)
 		if turn >= p.Turns {
 			break
 		}
