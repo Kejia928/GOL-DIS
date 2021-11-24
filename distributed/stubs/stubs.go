@@ -11,6 +11,7 @@ type RequestToWorker struct {
 	Turns int
 	ImageHeight int
 	ImageWidth int
+	Thread int
 	Stop bool
 }
 
@@ -18,6 +19,7 @@ type ResponseFromWorker struct {
 	NewWorld [][]byte
 	Turns int
 	AliveNumber int
+	Thread int
 }
 
 type RequestToBroker struct {
@@ -27,7 +29,6 @@ type RequestToBroker struct {
 }
 
 type RequestNewData struct {
-
 }
 
 type RequestQuit struct {
